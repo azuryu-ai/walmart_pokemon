@@ -520,13 +520,60 @@
   let isRunning = false;
   let eventSource = null;
 
+  // ── Persistence ──────────────────────────────────────────────────────────
+  function saveState() {
+    const rows = document.querySelectorAll('.item-row');
+    const items = [];
+    rows.forEach(row => {
+      const skuEl = row.querySelector('input[type="text"]');
+      const qtyEl = row.querySelector('.qty-input');
+      items.push({ sku: skuEl ? skuEl.value : '', qty: qtyEl ? qtyEl.value : '1' });
+    });
+    const state = {
+      dropTime: document.getElementById('dropTime').value,
+      dryRun: document.getElementById('dryRunToggle').checked,
+      keepOpen: document.getElementById('keepOpenToggle').checked,
+      items
+    };
+    localStorage.setItem('walmartBotState', JSON.stringify(state));
+  }
+
+  function loadState() {
+    try {
+      const raw = localStorage.getItem('walmartBotState');
+      if (!raw) return null;
+      return JSON.parse(raw);
+    } catch { return null; }
+  }
+
   // ── Init ─────────────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', () => {
-    addItem(); // start with one item row
-    // Set default drop time to now + 1 hour
-    const soon = new Date(Date.now() + 3600_000);
-    soon.setSeconds(0, 0);
-    document.getElementById('dropTime').value = soon.toISOString().slice(0, 19);
+    const saved = loadState();
+
+    if (saved && saved.items && saved.items.length > 0) {
+      // Restore saved items
+      saved.items.forEach(({ sku, qty }) => {
+        addItem();
+        const skuEl = document.getElementById(`sku-${itemCount}`);
+        const qtyEl = document.getElementById(`qty-${itemCount}`);
+        if (skuEl) skuEl.value = sku;
+        if (qtyEl) qtyEl.value = qty;
+      });
+      // Restore other fields
+      if (saved.dropTime) document.getElementById('dropTime').value = saved.dropTime;
+      document.getElementById('dryRunToggle').checked = saved.dryRun !== false;
+      document.getElementById('keepOpenToggle').checked = saved.keepOpen !== false;
+    } else {
+      addItem(); // start with one empty item row
+      // Set default drop time to now + 1 hour
+      const soon = new Date(Date.now() + 3600_000);
+      soon.setSeconds(0, 0);
+      document.getElementById('dropTime').value = soon.toISOString().slice(0, 19);
+    }
+
+    // Auto-save on any input change
+    document.addEventListener('change', saveState);
+    document.addEventListener('input', saveState);
   });
 
   // ── Item rows ────────────────────────────────────────────────────────────
@@ -550,6 +597,7 @@
 
     document.getElementById('itemsContainer').appendChild(row);
     updateAddBtn();
+    saveState();
   }
 
   function removeItem(idx) {
@@ -559,7 +607,7 @@
       row.style.opacity = '0';
       row.style.transform = 'translateY(-8px)';
       row.style.transition = 'all 0.2s';
-      setTimeout(() => { row.remove(); updateAddBtn(); }, 200);
+      setTimeout(() => { row.remove(); updateAddBtn(); saveState(); }, 200);
     }
   }
 
