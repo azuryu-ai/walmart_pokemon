@@ -1,0 +1,690 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DROP BOT</title>
+<link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700;900&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #080a0e;
+    --surface: #0d1117;
+    --surface2: #161b22;
+    --border: #21262d;
+    --accent: #00ff88;
+    --accent-dim: rgba(0,255,136,0.12);
+    --accent-glow: rgba(0,255,136,0.35);
+    --red: #ff4444;
+    --red-dim: rgba(255,68,68,0.12);
+    --yellow: #ffd700;
+    --text: #e6edf3;
+    --text-muted: #7d8590;
+    --mono: 'Share Tech Mono', monospace;
+    --sans: 'Barlow Condensed', sans-serif;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  /* ── Scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.08) 2px,
+      rgba(0,0,0,0.08) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ── Header ── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 20px 40px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: relative;
+    overflow: hidden;
+  }
+  header::after {
+    content: '';
+    position: absolute;
+    bottom: 0; left: 0;
+    width: 100%; height: 1px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    opacity: 0.6;
+  }
+  .logo-mark {
+    width: 36px; height: 36px;
+    border: 2px solid var(--accent);
+    display: grid;
+    place-items: center;
+    position: relative;
+  }
+  .logo-mark::before {
+    content: '';
+    position: absolute;
+    inset: 3px;
+    background: var(--accent);
+    clip-path: polygon(50% 0%, 100% 100%, 0% 100%);
+  }
+  .logo-text {
+    font-family: var(--sans);
+    font-size: 28px;
+    font-weight: 900;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+  }
+  .logo-text span { color: var(--accent); }
+  .status-pill {
+    margin-left: auto;
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    color: var(--text-muted);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    transition: all 0.3s;
+  }
+  .status-pill.running {
+    border-color: var(--accent);
+    color: var(--accent);
+    box-shadow: 0 0 12px var(--accent-glow);
+    animation: pulse-border 1.5s ease infinite;
+  }
+  @keyframes pulse-border {
+    0%, 100% { box-shadow: 0 0 8px var(--accent-glow); }
+    50% { box-shadow: 0 0 20px var(--accent-glow); }
+  }
+
+  /* ── Layout ── */
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    height: calc(100vh - 77px);
+  }
+
+  .panel {
+    padding: 32px 40px;
+    overflow-y: auto;
+  }
+  .panel-left { border-right: 1px solid var(--border); }
+  .panel-right { background: var(--surface); }
+
+  /* ── Section labels ── */
+  .section-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.2em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── Drop time input ── */
+  .drop-time-block {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 20px 24px;
+    margin-bottom: 32px;
+    position: relative;
+  }
+  .drop-time-block label {
+    display: block;
+    font-size: 11px;
+    font-family: var(--mono);
+    letter-spacing: 0.15em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+  }
+  .drop-time-block input[type="datetime-local"] {
+    width: 100%;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 18px;
+    padding: 12px 16px;
+    outline: none;
+    transition: border-color 0.2s;
+    color-scheme: dark;
+  }
+  .drop-time-block input[type="datetime-local"]:focus {
+    border-color: var(--accent);
+  }
+
+  /* ── Items ── */
+  .items-container { display: flex; flex-direction: column; gap: 12px; margin-bottom: 28px; }
+
+  .item-row {
+    display: grid;
+    grid-template-columns: auto 1fr 80px 36px;
+    gap: 8px;
+    align-items: center;
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    padding: 12px 14px;
+    transition: border-color 0.2s;
+    animation: slide-in 0.25s ease both;
+  }
+  @keyframes slide-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .item-row:focus-within { border-color: rgba(0,255,136,0.4); }
+
+  .item-num {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--accent);
+    width: 24px;
+    text-align: center;
+    flex-shrink: 0;
+  }
+
+  .item-row input[type="text"],
+  .item-row input[type="url"] {
+    background: transparent;
+    border: none;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12px;
+    padding: 4px 0;
+    outline: none;
+    width: 100%;
+    transition: border-color 0.2s;
+  }
+  .item-row input[type="text"]:focus,
+  .item-row input[type="url"]:focus {
+    border-bottom-color: var(--accent);
+  }
+  .item-row input::placeholder { color: var(--text-muted); }
+
+  .qty-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    min-width: 52px;
+  }
+  .qty-label {
+    font-family: var(--mono);
+    font-size: 9px;
+    letter-spacing: 0.15em;
+    color: var(--accent);
+    text-transform: uppercase;
+  }
+  .qty-input {
+    background: var(--bg) !important;
+    border: 1px solid var(--border) !important;
+    border-bottom: 1px solid var(--border) !important;
+    color: var(--text) !important;
+    font-family: var(--mono) !important;
+    font-size: 14px !important;
+    padding: 4px 8px !important;
+    text-align: center;
+    width: 100%;
+    outline: none;
+  }
+  .qty-input:focus { border-color: var(--accent) !important; }
+
+  .remove-btn {
+    background: none;
+    border: 1px solid transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 16px;
+    width: 36px; height: 36px;
+    display: grid;
+    place-items: center;
+    transition: all 0.15s;
+  }
+  .remove-btn:hover { border-color: var(--red); color: var(--red); background: var(--red-dim); }
+
+  .add-item-btn {
+    background: none;
+    border: 1px dashed var(--border);
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.1em;
+    padding: 10px;
+    width: 100%;
+    cursor: pointer;
+    transition: all 0.2s;
+    text-transform: uppercase;
+  }
+  .add-item-btn:hover:not(:disabled) {
+    border-color: var(--accent);
+    color: var(--accent);
+    background: var(--accent-dim);
+  }
+  .add-item-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+
+  /* ── Options row ── */
+  .options-row {
+    display: flex;
+    align-items: center;
+    gap: 24px;
+    margin-bottom: 28px;
+    padding: 16px 0;
+    border-top: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .toggle-label {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    user-select: none;
+  }
+  .toggle-label input[type="checkbox"] { display: none; }
+  .toggle {
+    width: 36px; height: 20px;
+    background: var(--border);
+    border-radius: 0;
+    position: relative;
+    transition: background 0.2s;
+  }
+  .toggle::after {
+    content: '';
+    position: absolute;
+    width: 14px; height: 14px;
+    top: 3px; left: 3px;
+    background: var(--text-muted);
+    transition: transform 0.2s, background 0.2s;
+  }
+  input[type="checkbox"]:checked + .toggle {
+    background: var(--accent-dim);
+    border: 1px solid var(--accent);
+  }
+  input[type="checkbox"]:checked + .toggle::after {
+    transform: translateX(16px);
+    background: var(--accent);
+  }
+  .toggle-label:has(input:checked) { color: var(--accent); }
+
+  /* ── Action buttons ── */
+  .action-row { display: flex; gap: 12px; }
+
+  .btn-start {
+    flex: 1;
+    background: var(--accent);
+    color: #000;
+    border: none;
+    font-family: var(--sans);
+    font-size: 18px;
+    font-weight: 900;
+    letter-spacing: 0.15em;
+    text-transform: uppercase;
+    padding: 16px 32px;
+    cursor: pointer;
+    position: relative;
+    overflow: hidden;
+    transition: all 0.15s;
+  }
+  .btn-start::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(255,255,255,0.15);
+    transform: translateX(-100%);
+    transition: transform 0.3s;
+  }
+  .btn-start:hover::before { transform: translateX(0); }
+  .btn-start:active { transform: scale(0.98); }
+  .btn-start:disabled {
+    background: var(--border);
+    color: var(--text-muted);
+    cursor: not-allowed;
+  }
+  .btn-start:disabled::before { display: none; }
+
+  .btn-stop {
+    background: none;
+    border: 1px solid var(--red);
+    color: var(--red);
+    font-family: var(--sans);
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 16px 24px;
+    cursor: pointer;
+    transition: all 0.15s;
+    display: none;
+  }
+  .btn-stop:hover { background: var(--red-dim); }
+  .btn-stop.visible { display: block; }
+
+  /* ── Log panel ── */
+  .log-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+  }
+  .log-clear {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+    background: none;
+    border: 1px solid var(--border);
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  .log-clear:hover { border-color: var(--text-muted); color: var(--text); }
+
+  .log-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    height: calc(100vh - 210px);
+    overflow-y: auto;
+    padding: 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    line-height: 1.7;
+    scroll-behavior: smooth;
+  }
+  .log-box::-webkit-scrollbar { width: 4px; }
+  .log-box::-webkit-scrollbar-track { background: var(--surface); }
+  .log-box::-webkit-scrollbar-thumb { background: var(--border); }
+
+  .log-line { display: block; padding: 1px 0; word-break: break-all; }
+  .log-line.success { color: var(--accent); }
+  .log-line.error { color: var(--red); }
+  .log-line.warn { color: var(--yellow); }
+  .log-line.info { color: var(--text-muted); }
+
+  .log-empty {
+    color: var(--text-muted);
+    font-family: var(--mono);
+    font-size: 12px;
+    text-align: center;
+    padding: 60px 0;
+    opacity: 0.5;
+  }
+
+  /* ── Cursor blink ── */
+  .blink {
+    animation: blink 1s step-end infinite;
+  }
+  @keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; height: auto; }
+    .panel-left { border-right: none; border-bottom: 1px solid var(--border); }
+    .log-box { height: 300px; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo-mark"></div>
+  <div class="logo-text">DROP<span>BOT</span></div>
+  <div class="status-pill" id="statusPill">IDLE</div>
+</header>
+
+<div class="layout">
+
+  <!-- ── LEFT: Config Panel ── -->
+  <div class="panel panel-left">
+
+    <div class="section-label">Drop Time</div>
+    <div class="drop-time-block">
+      <label>Scheduled Drop Time (Local)</label>
+      <input type="datetime-local" id="dropTime" step="1">
+    </div>
+
+    <div class="section-label">Product SKUs</div>
+    <div class="items-container" id="itemsContainer"></div>
+    <button class="add-item-btn" id="addItemBtn" onclick="addItem()">+ Add Item</button>
+
+    <br>
+
+    <div class="options-row">
+      <label class="toggle-label">
+        <input type="checkbox" id="dryRunToggle" checked>
+        <div class="toggle"></div>
+        Dry Run
+      </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="keepOpenToggle" checked>
+        <div class="toggle"></div>
+        Keep Browser Open
+      </label>
+    </div>
+
+    <div class="action-row">
+      <button class="btn-start" id="startBtn" onclick="startBot()">▶ LAUNCH BOT</button>
+      <button class="btn-stop" id="stopBtn" onclick="stopBot()">■ STOP</button>
+    </div>
+
+  </div>
+
+  <!-- ── RIGHT: Log Panel ── -->
+  <div class="panel panel-right">
+    <div class="log-header">
+      <div class="section-label" style="margin-bottom:0; flex:1">Live Output</div>
+      <button class="log-clear" onclick="clearLogs()">Clear</button>
+    </div>
+    <div class="log-box" id="logBox">
+      <div class="log-empty" id="logEmpty">Waiting for bot to start<span class="blink">_</span></div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+  // ── State ────────────────────────────────────────────────────────────────
+  let itemCount = 0;
+  let isRunning = false;
+  let eventSource = null;
+
+  // ── Init ─────────────────────────────────────────────────────────────────
+  document.addEventListener('DOMContentLoaded', () => {
+    addItem(); // start with one item row
+    // Set default drop time to now + 1 hour
+    const soon = new Date(Date.now() + 3600_000);
+    soon.setSeconds(0, 0);
+    document.getElementById('dropTime').value = soon.toISOString().slice(0, 19);
+  });
+
+  // ── Item rows ────────────────────────────────────────────────────────────
+  function addItem() {
+    if (itemCount >= 5) return;
+    itemCount++;
+    const idx = itemCount;
+
+    const row = document.createElement('div');
+    row.className = 'item-row';
+    row.id = `item-row-${idx}`;
+    row.innerHTML = `
+      <span class="item-num">${idx}</span>
+      <input type="text" placeholder="SKU / Item # (e.g. 123456789)" id="sku-${idx}" inputmode="numeric" />
+      <div class="qty-wrap">
+        <label class="qty-label">QTY</label>
+        <input type="number" class="qty-input" min="1" max="10" value="1" id="qty-${idx}" />
+      </div>
+      <button class="remove-btn" onclick="removeItem(${idx})" title="Remove">✕</button>
+    `;
+
+    document.getElementById('itemsContainer').appendChild(row);
+    updateAddBtn();
+  }
+
+  function removeItem(idx) {
+    const row = document.getElementById(`item-row-${idx}`);
+    if (row) {
+      row.style.animation = 'none';
+      row.style.opacity = '0';
+      row.style.transform = 'translateY(-8px)';
+      row.style.transition = 'all 0.2s';
+      setTimeout(() => { row.remove(); updateAddBtn(); }, 200);
+    }
+  }
+
+  function updateAddBtn() {
+    const rows = document.querySelectorAll('.item-row');
+    document.getElementById('addItemBtn').disabled = rows.length >= 5;
+  }
+
+  function getItems() {
+    const rows = document.querySelectorAll('.item-row');
+    const items = [];
+    rows.forEach((row, i) => {
+      const skuEl = row.querySelector('input[type="text"]');
+      const qtyEl = row.querySelector('.qty-input');
+      const sku = skuEl ? skuEl.value.trim().replace(/\D/g, '') : '';
+      const qty = qtyEl ? parseInt(qtyEl.value) || 1 : 1;
+      if (sku) {
+        items.push({ name: `Item${i+1}`, url: `https://www.walmart.com/ip/${sku}`, quantity: qty });
+      }
+    });
+    return items;
+  }
+
+  // ── Bot control ─────────────────────────────────────────────────────────
+  async function startBot() {
+    const items = getItems();
+    if (!items.length) {
+      appendLog('❌ Please add at least one product SKU.', 'error');
+      return;
+    }
+
+    const dropTime = document.getElementById('dropTime').value || '';
+    const dryRun = document.getElementById('dryRunToggle').checked;
+    const keepOpen = document.getElementById('keepOpenToggle').checked;
+
+    setRunning(true);
+    clearLogs();
+
+    const res = await fetch('/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items, drop_time: dropTime, dry_run: dryRun, keep_open: keepOpen })
+    });
+    const data = await res.json();
+
+    if (data.status === 'error') {
+      appendLog(`❌ ${data.message}`, 'error');
+      setRunning(false);
+      return;
+    }
+
+    startLogStream();
+  }
+
+  async function stopBot() {
+    await fetch('/stop', { method: 'POST' });
+    appendLog('⚠️  Stop signal sent.', 'warn');
+    setRunning(false);
+    if (eventSource) { eventSource.close(); eventSource = null; }
+  }
+
+  function setRunning(running) {
+    isRunning = running;
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const pill = document.getElementById('statusPill');
+
+    startBtn.disabled = running;
+    stopBtn.classList.toggle('visible', running);
+    pill.textContent = running ? 'RUNNING' : 'IDLE';
+    pill.classList.toggle('running', running);
+  }
+
+  // ── Log streaming ────────────────────────────────────────────────────────
+  function startLogStream() {
+    if (eventSource) eventSource.close();
+    eventSource = new EventSource('/logs');
+
+    eventSource.onmessage = (e) => {
+      if (!e.data) return; // keepalive ping
+      const msg = JSON.parse(e.data);
+      appendLog(msg);
+
+      // Auto-detect completion
+      if (msg.includes('Bot finished') || msg.includes('All items processed')) {
+        setRunning(false);
+      }
+    };
+
+    eventSource.onerror = () => {
+      appendLog('⚠️  Log stream disconnected.', 'warn');
+      eventSource.close();
+    };
+  }
+
+  function appendLog(msg, forceClass) {
+    const box = document.getElementById('logBox');
+    const empty = document.getElementById('logEmpty');
+    if (empty) empty.remove();
+
+    const line = document.createElement('span');
+    line.className = 'log-line';
+
+    if (forceClass) {
+      line.classList.add(forceClass);
+    } else if (msg.includes('✅') || msg.includes('Order placed') || msg.includes('Queue joined')) {
+      line.classList.add('success');
+    } else if (msg.includes('❌') || msg.includes('💥') || msg.includes('Error') || msg.includes('Failed')) {
+      line.classList.add('error');
+    } else if (msg.includes('⚠️') || msg.includes('DRY RUN') || msg.includes('Waking up')) {
+      line.classList.add('warn');
+    } else if (msg.includes('SERVER') || msg.includes('Bot finished')) {
+      line.classList.add('info');
+    }
+
+    line.textContent = msg;
+    box.appendChild(line);
+    box.scrollTop = box.scrollHeight;
+  }
+
+  function clearLogs() {
+    const box = document.getElementById('logBox');
+    box.innerHTML = '<div class="log-empty" id="logEmpty">Waiting for bot to start<span class="blink">_</span></div>';
+  }
+</script>
+
+</body>
+</html>
