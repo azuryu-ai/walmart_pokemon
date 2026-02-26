@@ -56,7 +56,7 @@ export const CONFIG = {
   queuePollIntervalMs: 1000,
 
   // Max minutes to wait inside a queue before giving up
-  queueMaxWaitMinutes: 30,
+  queueMaxWaitMinutes: 60,
 
 
   // ── Browser ────────────────────────────────────────────────────────────────
