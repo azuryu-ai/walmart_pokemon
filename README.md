@@ -83,14 +83,6 @@ node walmart_bot.js
 
 Reads directly from `config.js`.
 
-### Option C — Debug cart selectors
-
-```bash
-node debug_cart.js
-```
-
-Opens your cart page and prints all buttons/links so you can identify selectors if the bot gets stuck at checkout.
-
 ---
 
 ## Output files
