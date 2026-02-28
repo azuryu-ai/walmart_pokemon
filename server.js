@@ -21,6 +21,7 @@ import {
   joinQueue,
   addToCart,
   goToCheckout,
+  updateCartQuantity,
   completeCheckout,
   dismissPopups,
   logger,
@@ -177,7 +178,7 @@ async function runBotWithConfig(cfg) {
         const added = await addToCart(page, item.quantity, label);
         if (!added) { uiLog('❌ Failed to add to cart.', label); return; }
 
-        const checkedOut = await goToCheckout(page, label);
+        const checkedOut = await goToCheckout(page, label, item.quantity);
         if (!checkedOut) { uiLog('❌ Failed to reach checkout.', label); return; }
 
         await completeCheckout(page, cfg, label);
