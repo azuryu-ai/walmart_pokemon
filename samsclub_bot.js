@@ -245,53 +245,37 @@ export async function updateCartQuantity(page, targetQty, label) {
 
   log(`Adjusting cart quantity to ${targetQty}...`, label);
 
-  const increaseSelectors = [
-    "button[aria-label*='Increase quantity']",
-    "button[data-automation-id='increase-qty']",
-    "button[class*='increment']",
-    "button[class*='increase']",
-  ];
+  // Target the + button by its inner icon's data-testid, then click the parent button
+  const incBtn = page.locator('[data-testid="quantity-stepper-inc-icon"]').locator('..').first();
+  const decBtn = page.locator('[data-testid="quantity-stepper-dec-icon"]').locator('..').first();
 
-  // Parse current quantity from aria-label
+  // Read current quantity from the text between the +/- buttons
   let currentQty = 1;
-  for (const sel of increaseSelectors) {
-    try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 2000 })) {
-        const ariaLabel = await btn.getAttribute('aria-label') ?? '';
-        const match = ariaLabel.match(/Current Quantity\s+(\d+)/i);
-        if (match) currentQty = parseInt(match[1]);
-        break;
-      }
-    } catch { /* try next */ }
-  }
+  try {
+    const qtyText = await page.locator('[data-testid="quantity-stepper-count"]').first().innerText({ timeout: 3000 });
+    const parsed = parseInt(qtyText.trim());
+    if (!isNaN(parsed)) currentQty = parsed;
+  } catch { /* default to 1 */ }
+
+  log(`Current cart quantity: ${currentQty}, target: ${targetQty}.`, label);
 
   const diff = targetQty - currentQty;
   if (diff === 0) { log(`Quantity already ${targetQty}.`, label); return; }
 
-  const clickSelectors = diff > 0
-    ? increaseSelectors
-    : [
-        "button[aria-label*='Decrease quantity']",
-        "button[data-automation-id='decrease-qty']",
-        "button[class*='decrement']",
-        "button[class*='decrease']",
-      ];
+  const btn = diff > 0 ? incBtn : decBtn;
+  const clicks = Math.abs(diff);
 
-  for (let i = 0; i < Math.abs(diff); i++) {
-    for (const sel of clickSelectors) {
-      try {
-        const btn = page.locator(sel).first();
-        if (await btn.isVisible({ timeout: 1500 })) {
-          await btn.click();
-          await sleep(600);
-          break;
-        }
-      } catch { /* try next */ }
+  for (let i = 0; i < clicks; i++) {
+    try {
+      await btn.waitFor({ state: 'visible', timeout: 3000 });
+      await btn.click();
+      await sleep(500);
+    } catch (e) {
+      log(`⚠️  Click ${i + 1}/${clicks} failed: ${e.message}`, label);
     }
   }
 
-  log(`Quantity set to ${targetQty}.`, label);
+  log(`✅ Quantity set to ${targetQty}.`, label);
 }
 
 
