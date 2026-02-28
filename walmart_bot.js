@@ -289,7 +289,67 @@ export async function addToCart(page, quantity, label) {
 }
 
 
-export async function goToCheckout(page, label) {
+/**
+ * updateCartQuantity
+ * ------------------
+ * Called while on the walmart.com/cart page.
+ * Walmart's cart uses aria-label stepper buttons with labels like:
+ *   "Increase quantity <item name>, Current Quantity 1"
+ *   "Decrease quantity <item name>, Current Quantity 1"
+ * We read the current quantity from the Increase button's aria-label,
+ * then click + or − the right number of times to reach the target.
+ */
+export async function updateCartQuantity(page, quantity, label) {
+  log(`Attempting to set cart quantity to ${quantity}...`, label);
+
+  try {
+    // Find the Increase button — its aria-label tells us current quantity
+    const increaseBtn = page.locator('button[aria-label*="Increase quantity"]').first();
+    const decreaseBtn = page.locator('button[aria-label*="Decrease quantity"]').first();
+
+    if (!await increaseBtn.isVisible({ timeout: 3000 })) {
+      log('⚠️  Stepper buttons not visible — cannot update quantity.', label);
+      await page.screenshot({ path: `cart_qty_debug_${label}.png` });
+      return;
+    }
+
+    // Parse current quantity out of aria-label e.g. "...Current Quantity 1"
+    const ariaLabel = await increaseBtn.getAttribute('aria-label') ?? '';
+    const match = ariaLabel.match(/Current Quantity\s+(\d+)/i);
+    const currentQty = match ? parseInt(match[1], 10) : 1;
+    log(`Cart current quantity: ${currentQty}, target: ${quantity}`, label);
+
+    const diff = quantity - currentQty;
+    if (diff === 0) {
+      log(`Cart quantity already at ${quantity} — no change needed.`, label);
+      return;
+    }
+
+    const btn = diff > 0 ? increaseBtn : decreaseBtn;
+    const clicks = Math.abs(diff);
+    log(`Clicking ${diff > 0 ? 'Increase' : 'Decrease'} button ${clicks} time(s)...`, label);
+
+    for (let i = 0; i < clicks; i++) {
+      await btn.click();
+      await sleep(600); // give Walmart's cart UI time to update between clicks
+    }
+
+    // Verify the update by re-reading the aria-label
+    await sleep(1000);
+    const updatedLabel = await increaseBtn.getAttribute('aria-label') ?? '';
+    const updatedMatch = updatedLabel.match(/Current Quantity\s+(\d+)/i);
+    const updatedQty = updatedMatch ? parseInt(updatedMatch[1], 10) : '?';
+    log(`✅ Cart quantity updated to ${updatedQty}.`, label);
+
+  } catch (e) {
+    log(`⚠️  updateCartQuantity error: ${e.message}`, label);
+    await page.screenshot({ path: `cart_qty_debug_${label}.png` });
+    log(`Screenshot saved: cart_qty_debug_${label}.png`, label);
+  }
+}
+
+
+export async function goToCheckout(page, label, quantity = 1) {
   log('Navigating to cart...', label);
 
   const cartSelectors = [
@@ -323,6 +383,13 @@ export async function goToCheckout(page, label) {
   await dismissPopups(page);
   log('Waiting for cart to fully load...', label);
   await sleep(3000);
+
+  // ── Update quantity on cart page before proceeding to checkout ────────────
+  if (quantity > 1) {
+    await updateCartQuantity(page, quantity, label);
+  } else {
+    log('Quantity is 1 — skipping cart quantity update.', label);
+  }
 
   const checkoutSelectors = [
     "button[data-automation-id='checkout']",
@@ -502,7 +569,7 @@ export async function runBot(cfg) {
         const added = await addToCart(page, item.quantity, label);
         if (!added) { log('❌ Failed to add to cart.', label); return; }
 
-        const checkedOut = await goToCheckout(page, label);
+        const checkedOut = await goToCheckout(page, label, item.quantity);
         if (!checkedOut) { log('❌ Failed to reach checkout.', label); return; }
 
         await completeCheckout(page, cfg, label);
