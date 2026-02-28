@@ -1,7 +1,12 @@
 /**
- * Walmart Drop Bot — Configuration
- * =================================
- * Edit this file before running the bot.
+ * Drop Bot — Configuration
+ * ========================
+ * Used when running the bots directly from the command line:
+ *   node walmart_bot.js
+ *   node samsclub_bot.js
+ *
+ * When using the web UI (node server.js), all settings come from
+ * the browser interface and this file is ignored.
  */
 
 export const CONFIG = {
@@ -9,6 +14,9 @@ export const CONFIG = {
   // ── Items (max 5) ──────────────────────────────────────────────────────────
   // Add up to 5 items. Each item runs in its own browser tab concurrently.
   // "name" is just a label used in logs and screenshot filenames.
+  //
+  // Walmart URL format:    https://www.walmart.com/ip/SKU
+  // Sam's Club URL format: https://www.samsclub.com/ip/SKU
   items: [
     {
       name: "Item1",
@@ -48,22 +56,25 @@ export const CONFIG = {
   queueLeadSeconds: 5,
 
 
-  // ── Queue settings ─────────────────────────────────────────────────────────
-  // How many page-reload attempts to make looking for the ATC button
+  // ── Queue / polling settings ────────────────────────────────────────────────
+  // How many page-reload attempts to make looking for the Add to Cart button.
+  // Applies to both Walmart (queue polling) and Sam's Club (ATC availability polling).
   queueMaxAttempts: 120,
 
   // Milliseconds between each poll attempt
   queuePollIntervalMs: 1000,
 
-  // Max minutes to wait inside a queue before giving up
-  queueMaxWaitMinutes: 60,
+  // Max minutes to wait inside a Walmart queue before giving up
+  queueMaxWaitMinutes: 30,
 
 
   // ── Browser ────────────────────────────────────────────────────────────────
   // Path to your Chrome profile directory.
-  // Using a dedicated WalmartBot profile is recommended.
-  // Create this folder manually first, then log into Walmart in it.
-  chromeProfilePath: "C:/Users/Dave/AppData/Local/Google/Chrome/WalmartBot",
+  // Tip: create a dedicated profile for the bot and log into your store there.
+  //   Walmart:    log in at walmart.com
+  //   Sam's Club: log in at samsclub.com
+  // Make sure saved shipping address and default payment method are set.
+  chromeProfilePath: "C:/Users/Dave/AppData/Local/Google/Chrome/DropBot",
 
   // Direct path to Chrome executable
   // Common locations:
@@ -74,7 +85,7 @@ export const CONFIG = {
   // Run headless (no visible window). Keep false to watch it run.
   headless: false,
 
-  // Keep the browser open after completion so you can verify the result
+  // Keep the browser open after completion so you can verify the result.
   keepBrowserOpen: true,
 
 
