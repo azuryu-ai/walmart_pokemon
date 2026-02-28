@@ -16,16 +16,25 @@ import { fileURLToPath } from 'url';
 import { chromium } from 'playwright';
 import { CONFIG } from './config.js';
 import {
-  navigateToProduct,
-  waitUntilDropTime,
+  navigateToProduct as walmartNavigateToProduct,
+  waitUntilDropTime as walmartWaitUntilDropTime,
   joinQueue,
-  addToCart,
-  goToCheckout,
-  updateCartQuantity,
-  completeCheckout,
-  dismissPopups,
-  logger,
+  addToCart as walmartAddToCart,
+  goToCheckout as walmartGoToCheckout,
+  completeCheckout as walmartCompleteCheckout,
+  dismissPopups as walmartDismissPopups,
+  logger as walmartLogger,
 } from './walmart_bot.js';
+
+import {
+  navigateToProduct as samsNavigateToProduct,
+  waitUntilDropTime as samsWaitUntilDropTime,
+  addToCart as samsAddToCart,
+  goToCheckout as samsGoToCheckout,
+  completeCheckout as samsCompleteCheckout,
+  dismissPopups as samsDismissPopups,
+  logger as samsLogger,
+} from './samsclub_bot.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -56,7 +65,8 @@ function broadcast(msg) {
 }
 
 // Route all bot log calls through uiLog so they appear in the UI's SSE stream
-logger.fn = uiLog;
+walmartLogger.fn = uiLog;
+samsLogger.fn = uiLog;
 
 
 // ── Routes ────────────────────────────────────────────────────────────────────
@@ -72,7 +82,7 @@ app.post('/start', async (req, res) => {
     return res.json({ status: 'error', message: 'Bot is already running.' });
   }
 
-  let { items, drop_time, dry_run, keep_open } = req.body;
+  let { items, drop_time, dry_run, keep_open, bot } = req.body;
 
   if (!items || !items.length) {
     return res.json({ status: 'error', message: 'No items provided.' });
@@ -86,10 +96,11 @@ app.post('/start', async (req, res) => {
     dropTimeIso: drop_time ?? CONFIG.dropTimeIso,
     dryRun: dry_run ?? CONFIG.dryRun,
     keepBrowserOpen: keep_open ?? CONFIG.keepBrowserOpen,
+    bot: bot ?? 'walmart',
   };
 
   botRunning = true;
-  uiLog('Bot started from UI.', 'SERVER');
+  uiLog(`Bot started from UI. [${(cfg.bot).toUpperCase()}]`, 'SERVER');
 
   // Run bot in background (don't await)
   runBotWithConfig(cfg).finally(() => {
@@ -138,9 +149,17 @@ app.get('/logs', (req, res) => {
 
 async function runBotWithConfig(cfg) {
   const items = cfg.items ?? [];
+  const isSams = cfg.bot === 'samsclub';
+
+  const botLabel = isSams ? "Sam's Club Drop Bot" : "Walmart Drop Bot";
+  const navigateToProduct = isSams ? samsNavigateToProduct : walmartNavigateToProduct;
+  const waitUntilDropTime = isSams ? samsWaitUntilDropTime : walmartWaitUntilDropTime;
+  const addToCart = isSams ? samsAddToCart : walmartAddToCart;
+  const goToCheckout = isSams ? samsGoToCheckout : walmartGoToCheckout;
+  const completeCheckout = isSams ? samsCompleteCheckout : walmartCompleteCheckout;
 
   uiLog('='.repeat(50));
-  uiLog('  Walmart Drop Bot');
+  uiLog(`  ${botLabel}`);
   uiLog(`  Items   : ${items.length}`);
   for (const [i, item] of items.entries()) {
     uiLog(`    [${i + 1}] ${item.name ?? `Item${i + 1}`} — qty ${item.quantity} — ${item.url}`);
@@ -172,13 +191,15 @@ async function runBotWithConfig(cfg) {
     async function runItem(page, item, index) {
       const label = item.name ?? `Item${index + 1}`;
       try {
-        const inQueue = await joinQueue(page, cfg, item, label);
-        if (!inQueue) { uiLog('❌ Failed to reach Add to Cart.', label); return; }
+        if (!isSams) {
+          const inQueue = await joinQueue(page, cfg, item, label);
+          if (!inQueue) { uiLog('❌ Failed to reach Add to Cart.', label); return; }
+        }
 
         const added = await addToCart(page, item.quantity, label);
         if (!added) { uiLog('❌ Failed to add to cart.', label); return; }
 
-        const checkedOut = await goToCheckout(page, label, item.quantity);
+        const checkedOut = await goToCheckout(page, label);
         if (!checkedOut) { uiLog('❌ Failed to reach checkout.', label); return; }
 
         await completeCheckout(page, cfg, label);
@@ -207,7 +228,7 @@ async function runBotWithConfig(cfg) {
 const PORT = 5000;
 app.listen(PORT, () => {
   console.log('='.repeat(50));
-  console.log('  Walmart Drop Bot UI');
+  console.log('  Drop Bot UI (Walmart + Sam\'s Club)');
   console.log(`  Open http://localhost:${PORT} in your browser`);
   console.log('='.repeat(50));
 });
