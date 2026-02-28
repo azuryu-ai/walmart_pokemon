@@ -54,6 +54,7 @@ export async function waitUntilDropTime(dropTimeIso, leadSeconds = 5) {
   }
 }
 
+// Dismisses general popups (cookie banners, modals, etc.)
 export async function dismissPopups(page) {
   const selectors = [
     "button[data-automation-id='close-modal']",
@@ -76,6 +77,72 @@ export async function dismissPopups(page) {
     } catch {
       // ignore
     }
+  }
+}
+
+// Dismisses error/alert dialogs that Sam's Club shows during drops
+// (e.g. "Something went wrong", "Item unavailable", "Please try again")
+// Returns true if an error popup was found and dismissed.
+async function dismissErrorPopups(page, label) {
+  const errorSelectors = [
+    // Generic error modals
+    "button:has-text('Try again')",
+    "button:has-text('OK')",
+    "button:has-text('Ok')",
+    "button:has-text('Got it')",
+    "button:has-text('Dismiss')",
+    "button:has-text('Close')",
+    "button[aria-label='Close']",
+    "button[aria-label='close']",
+    // Sam's Club specific error dialogs
+    "[data-automation-id='error-modal-close']",
+    "[data-automation-id='alert-close']",
+    "[data-testid='modal-close']",
+    "[data-testid='error-close']",
+    // Toast/snackbar dismiss
+    "[data-testid='toast-close']",
+    "button[class*='modal-close']",
+    "button[class*='dialog-close']",
+    "button[class*='alert-close']",
+  ];
+
+  let dismissed = false;
+  for (const sel of errorSelectors) {
+    try {
+      const btn = page.locator(sel).first();
+      if (await btn.isVisible({ timeout: 600 })) {
+        const text = await btn.innerText().catch(() => sel);
+        log(`⚠️  Error popup detected — dismissing: "${text.trim()}"`, label);
+        await btn.click();
+        await sleep(500);
+        dismissed = true;
+      }
+    } catch {
+      // not visible, try next
+    }
+  }
+  return dismissed;
+}
+
+// Retries an async action indefinitely until it succeeds, dismissing error popups between each attempt.
+async function withRetry(action, { label, taskName, delayMs = 1500, page }) {
+  let attempt = 0;
+  while (true) {
+    attempt++;
+    try {
+      const result = await action();
+      if (result !== false) return result;
+      // action returned false — treat as soft failure, retry
+      log(`⚠️  ${taskName} attempt ${attempt} failed — retrying...`, label);
+    } catch (e) {
+      log(`⚠️  ${taskName} attempt ${attempt} error: ${e.message} — retrying...`, label);
+    }
+
+    // Dismiss any error popups before retrying
+    const hadPopup = await dismissErrorPopups(page, label);
+    if (!hadPopup) await dismissPopups(page);
+    log(`🔄 Retrying ${taskName} (attempt ${attempt + 1})...`, label);
+    await sleep(delayMs);
   }
 }
 
@@ -112,6 +179,7 @@ export async function waitForAddToCart(page, cfg, label) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
       await page.reload({ waitUntil: 'domcontentloaded' });
+      await dismissErrorPopups(page, label);
       await dismissPopups(page);
 
       log(`Page URL: ${page.url()}`, label);
@@ -186,7 +254,7 @@ export async function addToCart(page, quantity, label) {
     }
   }
 
-  // Click Add to Cart
+  // Click Add to Cart — with retry on error popups
   const atcSelectors = [
     "button[data-automation-id='atc-button']",
     "button[class*='add-to-cart']",
@@ -196,240 +264,276 @@ export async function addToCart(page, quantity, label) {
     "button[id*='addToCart']",
   ];
 
-  for (const sel of atcSelectors) {
-    try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 2000 })) {
-        await btn.click();
-        log('Clicked Add to Cart.', label);
-        await sleep(2500);
+  const result = await withRetry(async () => {
+    for (const sel of atcSelectors) {
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 2000 })) {
+          await btn.click();
+          log('Clicked Add to Cart.', label);
+          await sleep(2500);
 
-        // Confirm item was added
-        const confirmSelectors = [
-          "[aria-label*='cart']",
-          ".cart-count",
-          "button:has-text('View cart')",
-          "button:has-text('Go to cart')",
-          "[data-automation-id='cart-icon']",
-          ".sc-cart-icon",
-        ];
+          // Check for error popup after clicking
+          const hadError = await dismissErrorPopups(page, label);
+          if (hadError) return false; // trigger retry
 
-        for (const csel of confirmSelectors) {
-          try {
-            const el = page.locator(csel).first();
-            if (await el.isVisible({ timeout: 2000 })) {
-              log('✅ Item added to cart.', label);
-              return true;
-            }
-          } catch { /* try next */ }
+          // Confirm item was added
+          const confirmSelectors = [
+            "[aria-label*='cart']",
+            ".cart-count",
+            "button:has-text('View cart')",
+            "button:has-text('Go to cart')",
+            "[data-automation-id='cart-icon']",
+            ".sc-cart-icon",
+          ];
+
+          for (const csel of confirmSelectors) {
+            try {
+              const el = page.locator(csel).first();
+              if (await el.isVisible({ timeout: 2000 })) {
+                log('✅ Item added to cart.', label);
+                return true;
+              }
+            } catch { /* try next */ }
+          }
+
+          // Optimistically proceed if we can't confirm
+          log('⚠️  Could not confirm cart add — proceeding anyway.', label);
+          return true;
         }
-
-        // Optimistically proceed if we can't confirm
-        log('⚠️  Could not confirm cart add — proceeding anyway.', label);
-        return true;
+      } catch {
+        // try next selector
       }
-    } catch {
-      // try next selector
     }
-  }
+    return false;
+  }, { label, taskName: 'Add to Cart', delayMs: 2000, page });
 
-  log('❌ Could not find Add to Cart button.', label);
-  await page.screenshot({ path: `atc_failed_${label}.png` });
-  log(`Screenshot saved: atc_failed_${label}.png`, label);
-  return false;
+  if (!result) {
+    await page.screenshot({ path: `atc_failed_${label}.png` });
+    log(`Screenshot saved: atc_failed_${label}.png`, label);
+  }
+  return result;
 }
 
+
+async function readCartQuantity(page) {
+  try {
+    const qtyText = await page.locator('[data-testid="quantity-stepper-count"]').first().innerText({ timeout: 3000 });
+    const parsed = parseInt(qtyText.trim());
+    if (!isNaN(parsed)) return parsed;
+  } catch { /* ignore */ }
+  return null;
+}
 
 export async function updateCartQuantity(page, targetQty, label) {
   if (targetQty <= 1) return;
 
   log(`Adjusting cart quantity to ${targetQty}...`, label);
 
-  // Target the + button by its inner icon's data-testid, then click the parent button
-  const incBtn = page.locator('[data-testid="quantity-stepper-inc-icon"]').locator('..').first();
-  const decBtn = page.locator('[data-testid="quantity-stepper-dec-icon"]').locator('..').first();
+  // Keep looping until the cart quantity matches the target
+  let attempts = 0;
+  while (true) {
+    attempts++;
 
-  // Read current quantity from the text between the +/- buttons
-  let currentQty = 1;
-  try {
-    const qtyText = await page.locator('[data-testid="quantity-stepper-count"]').first().innerText({ timeout: 3000 });
-    const parsed = parseInt(qtyText.trim());
-    if (!isNaN(parsed)) currentQty = parsed;
-  } catch { /* default to 1 */ }
+    // Read current quantity
+    const currentQty = await readCartQuantity(page) ?? 1;
+    log(`Cart quantity: ${currentQty} / target: ${targetQty} (attempt ${attempts})`, label);
 
-  log(`Current cart quantity: ${currentQty}, target: ${targetQty}.`, label);
-
-  const diff = targetQty - currentQty;
-  if (diff === 0) { log(`Quantity already ${targetQty}.`, label); return; }
-
-  const btn = diff > 0 ? incBtn : decBtn;
-  const clicks = Math.abs(diff);
-
-  for (let i = 0; i < clicks; i++) {
-    try {
-      await btn.waitFor({ state: 'visible', timeout: 3000 });
-      await btn.click();
-      await sleep(500);
-    } catch (e) {
-      log(`⚠️  Click ${i + 1}/${clicks} failed: ${e.message}`, label);
+    if (currentQty === targetQty) {
+      log(`✅ Cart quantity confirmed at ${targetQty}.`, label);
+      return;
     }
-  }
 
-  log(`✅ Quantity set to ${targetQty}.`, label);
+    const diff = targetQty - currentQty;
+    const btn = diff > 0
+      ? page.locator('[data-testid="quantity-stepper-inc-icon"]').locator('..').first()
+      : page.locator('[data-testid="quantity-stepper-dec-icon"]').locator('..').first();
+    const clicks = Math.abs(diff);
+
+    log(`Clicking ${diff > 0 ? '+' : '-'} button ${clicks} time(s)...`, label);
+    for (let i = 0; i < clicks; i++) {
+      try {
+        await btn.waitFor({ state: 'visible', timeout: 3000 });
+        await btn.click();
+        await sleep(600);
+        await dismissErrorPopups(page, label);
+      } catch (e) {
+        log(`⚠️  Button click ${i + 1}/${clicks} failed: ${e.message}`, label);
+      }
+    }
+
+    // Wait for UI to settle then verify
+    await sleep(800);
+    const verifiedQty = await readCartQuantity(page) ?? 1;
+    if (verifiedQty === targetQty) {
+      log(`✅ Cart quantity confirmed at ${targetQty}.`, label);
+      return;
+    }
+
+    log(`⚠️  Quantity is ${verifiedQty}, expected ${targetQty} — retrying...`, label);
+    await dismissErrorPopups(page, label);
+    await sleep(1000);
+  }
 }
 
 
 export async function goToCheckout(page, label, quantity = 1) {
   log('Navigating to cart...', label);
 
-  const cartSelectors = [
-    "a[href*='/cart']",
-    "button:has-text('View cart')",
-    "button:has-text('Go to cart')",
-    "[data-automation-id='cart-icon']",
-    ".sc-cart-icon",
-    "a[href='/cart']",
-  ];
+  // Navigate to cart — with retry
+  const cartNavigated = await withRetry(async () => {
+    const cartSelectors = [
+      "a[href*='/cart']",
+      "button:has-text('View cart')",
+      "button:has-text('Go to cart')",
+      "[data-automation-id='cart-icon']",
+      ".sc-cart-icon",
+      "a[href='/cart']",
+    ];
 
-  let navigated = false;
-  for (const sel of cartSelectors) {
-    try {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 2000 })) {
-        await el.click();
-        await page.waitForLoadState('domcontentloaded');
-        log('In cart.', label);
-        navigated = true;
-        break;
+    for (const sel of cartSelectors) {
+      try {
+        const el = page.locator(sel).first();
+        if (await el.isVisible({ timeout: 2000 })) {
+          await el.click();
+          await page.waitForLoadState('domcontentloaded');
+          log('In cart.', label);
+          return true;
+        }
+      } catch {
+        // try next
       }
-    } catch {
-      // try next
     }
-  }
 
-  if (!navigated) {
+    // Fall back to direct navigation
     log('Cart button not found — navigating directly to /cart', label);
     await page.goto('https://www.samsclub.com/cart', { waitUntil: 'domcontentloaded' });
+
+    // Check for error after navigation
+    const hadError = await dismissErrorPopups(page, label);
+    if (hadError) return false; // retry
+
+    return true;
+  }, { label, taskName: 'Navigate to cart', delayMs: 2000, page });
+
+  if (!cartNavigated) {
+    await page.screenshot({ path: `cart_debug_${label}.png` });
+    log(`Screenshot saved: cart_debug_${label}.png`, label);
+    return false;
   }
 
   await dismissPopups(page);
   log('Waiting for cart to fully load...', label);
-
-  // Wait for network to settle rather than a blind sleep
   try {
     await page.waitForLoadState('networkidle', { timeout: 8_000 });
-  } catch {
-    // non-fatal — page may still be usable
-  }
+  } catch { /* non-fatal */ }
   await sleep(1000);
 
-  // Update quantity in cart if needed
+  // Update quantity in cart if needed — already has internal retry
   if (quantity > 1) {
     await updateCartQuantity(page, quantity, label);
     await sleep(1000);
   }
 
-  const checkoutSelectors = [
-    "[data-automation-id='checkout']",
-    "[id='Continue to checkout button']",
-    "[data-automation-id='checkout-btn']",
-    "[data-automation-id='proceed-to-checkout']",
-    "button:has-text('Check Out')",
-    "button:has-text('Check out')",
-    "button:has-text('Checkout')",
-    "button:has-text('Proceed to checkout')",
-    "button:has-text('Continue to checkout')",
-    "a:has-text('Proceed to checkout')",
-    "a:has-text('Continue to checkout')",
-    "a:has-text('Checkout')",
-    "button[class*='checkout']",
-    "a[class*='checkout']",
-    ".sc-checkout-btn",
-  ];
-
-  // Explicitly wait up to 10s for the Check Out button to appear before cycling selectors
-  log('Waiting for Check Out button to appear...', label);
-  try {
-    await page.waitForSelector('[data-automation-id="checkout"]', { state: 'visible', timeout: 3_000 });
-    log('Check Out button is visible.', label);
-  } catch {
-    log('Timed out waiting — proceeding anyway...', label);
-  }
-
-  log('Looking for checkout button...', label);
-  for (const sel of checkoutSelectors) {
+  // Click checkout button — with retry
+  const checkedOut = await withRetry(async () => {
+    // Explicitly wait for the checkout button to appear
     try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 3_000 })) {
-        await btn.scrollIntoViewIfNeeded();
-        await btn.click();
-        await page.waitForLoadState('domcontentloaded');
-        log('✅ Proceeded to checkout.', label);
-        return true;
-      }
-    } catch {
-      // try next
-    }
-  }
+      await page.waitForSelector('[data-automation-id="checkout"]', { state: 'visible', timeout: 3_000 });
+    } catch { /* proceed anyway */ }
 
-  // JS-based fallback — directly query the DOM bypassing Playwright selector quirks
-  log('CSS selectors failed — trying JS evaluate fallback...', label);
-  try {
+    const checkoutSelectors = [
+      "[data-automation-id='checkout']",
+      "[id='Continue to checkout button']",
+      "[data-automation-id='checkout-btn']",
+      "[data-automation-id='proceed-to-checkout']",
+      "button:has-text('Check Out')",
+      "button:has-text('Check out')",
+      "button:has-text('Checkout')",
+      "button:has-text('Proceed to checkout')",
+      "button:has-text('Continue to checkout')",
+      "a:has-text('Proceed to checkout')",
+      "a:has-text('Continue to checkout')",
+      "a:has-text('Checkout')",
+      "button[class*='checkout']",
+      "a[class*='checkout']",
+      ".sc-checkout-btn",
+    ];
+
+    for (const sel of checkoutSelectors) {
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 3_000 })) {
+          await btn.scrollIntoViewIfNeeded();
+          await btn.click();
+          await sleep(1500);
+
+          // Check for error popup after clicking checkout
+          const hadError = await dismissErrorPopups(page, label);
+          if (hadError) return false; // retry
+
+          await page.waitForLoadState('domcontentloaded');
+          log('✅ Proceeded to checkout.', label);
+          return true;
+        }
+      } catch {
+        // try next
+      }
+    }
+
+    // JS evaluate fallback
+    log('CSS selectors failed — trying JS evaluate fallback...', label);
     const clicked = await page.evaluate(() => {
       const byAutomation = document.querySelector('[data-automation-id="checkout"]');
       if (byAutomation) { byAutomation.click(); return 'automation-id'; }
-
       const byId = document.getElementById('Continue to checkout button');
       if (byId) { byId.click(); return 'id'; }
-
       const allBtns = Array.from(document.querySelectorAll('button'));
       const match = allBtns.find(b => /check[\s-]?out/i.test(b.innerText));
       if (match) { match.click(); return 'text-match'; }
-
       return null;
-    });
+    }).catch(() => null);
 
     if (clicked) {
-      log(`✅ Checkout clicked via JS fallback (matched by: ${clicked}).`, label);
+      await sleep(1500);
+      const hadError = await dismissErrorPopups(page, label);
+      if (hadError) return false;
       await page.waitForLoadState('domcontentloaded');
+      log(`✅ Checkout clicked via JS fallback (matched by: ${clicked}).`, label);
       return true;
     }
-  } catch (e) {
-    log(`JS fallback error: ${e.message}`, label);
+
+    return false;
+  }, { label, taskName: 'Click checkout button', delayMs: 2000, page });
+
+  if (!checkedOut) {
+    // Diagnostic dump
+    log('⚠️  Checkout button not found — dumping visible buttons for diagnosis...', label);
+    try {
+      const allBtns = await page.locator('button, a[href*="checkout"]').all();
+      for (const b of allBtns) {
+        const t = await b.innerText().catch(() => '');
+        const cls = await b.getAttribute('class').catch(() => '');
+        const id = await b.getAttribute('id').catch(() => '');
+        const automation = await b.getAttribute('data-automation-id').catch(() => '');
+        if (t.trim()) log(`  Button: "${t.trim().slice(0, 40)}" [class="${(cls ?? '').slice(0, 40)}" id="${id}" automation="${automation}"]`, label);
+      }
+      log(`  Current URL: ${page.url()}`, label);
+    } catch (e) {
+      log(`  Diagnostic error: ${e.message}`, label);
+    }
+    await page.screenshot({ path: `cart_debug_${label}.png` });
+    log(`Screenshot saved: cart_debug_${label}.png`, label);
   }
 
-    // Diagnostic: log all visible buttons on the cart page to help identify the right selector
-  log('⚠️  Checkout button not found — dumping visible buttons for diagnosis...', label);
-  try {
-    const allBtns = await page.locator('button, a[href*="checkout"]').all();
-    const texts = [];
-    for (const b of allBtns) {
-      const t = await b.innerText().catch(() => '');
-      const cls = await b.getAttribute('class').catch(() => '');
-      const id = await b.getAttribute('id').catch(() => '');
-      const automation = await b.getAttribute('data-automation-id').catch(() => '');
-      if (t.trim()) texts.push(`"${t.trim().slice(0, 40)}" [class="${(cls ?? '').slice(0, 40)}" id="${id}" automation="${automation}"]`);
-    }
-    if (texts.length) {
-      for (const t of texts) log(`  Button: ${t}`, label);
-    } else {
-      log('  No buttons found on page.', label);
-    }
-    log(`  Current URL: ${page.url()}`, label);
-  } catch (e) {
-    log(`  Diagnostic error: ${e.message}`, label);
-  }
-
-  log('❌ Could not find checkout button.', label);
-  await page.screenshot({ path: `cart_debug_${label}.png` });
-  log(`Screenshot saved: cart_debug_${label}.png`, label);
-  return false;
+  return checkedOut;
 }
 
 
 export async function completeCheckout(page, cfg, label) {
   log('Starting checkout completion...', label);
   await sleep(2000);
+  await dismissErrorPopups(page, label);
   await dismissPopups(page);
 
   try {
@@ -446,40 +550,50 @@ export async function completeCheckout(page, cfg, label) {
     ".sc-continue-btn",
   ];
 
+  // Shipping step — with retry
   log('Checking shipping details...', label);
-  for (const sel of continueSelectors) {
-    try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 3000 })) {
-        await btn.click();
-        await sleep(2000);
-        log('Continued past shipping step.', label);
-        break;
-      }
-    } catch {
-      // try next
+  await withRetry(async () => {
+    for (const sel of continueSelectors) {
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 3000 })) {
+          await btn.click();
+          await sleep(2000);
+          const hadError = await dismissErrorPopups(page, label);
+          if (hadError) return false;
+          log('Continued past shipping step.', label);
+          return true;
+        }
+      } catch { /* try next */ }
     }
-  }
+    return true; // no shipping step visible — that's OK
+  }, { label, taskName: 'Shipping step', delayMs: 2000, page });
 
+  // Payment step — with retry
   log('Checking payment details...', label);
   await sleep(2000);
+  await dismissErrorPopups(page, label);
   await dismissPopups(page);
 
-  for (const sel of continueSelectors) {
-    try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 3000 })) {
-        await btn.click();
-        await sleep(2000);
-        log('Continued past payment step.', label);
-        break;
-      }
-    } catch {
-      // try next
+  await withRetry(async () => {
+    for (const sel of continueSelectors) {
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 3000 })) {
+          await btn.click();
+          await sleep(2000);
+          const hadError = await dismissErrorPopups(page, label);
+          if (hadError) return false;
+          log('Continued past payment step.', label);
+          return true;
+        }
+      } catch { /* try next */ }
     }
-  }
+    return true; // no payment step visible — that's OK
+  }, { label, taskName: 'Payment step', delayMs: 2000, page });
 
   await sleep(2000);
+  await dismissErrorPopups(page, label);
   await dismissPopups(page);
 
   if (cfg.dryRun) {
@@ -490,6 +604,7 @@ export async function completeCheckout(page, cfg, label) {
     return false;
   }
 
+  // Place Order — with retry
   const placeOrderSelectors = [
     "button:has-text('Place order')",
     "button:has-text('Place your order')",
@@ -498,29 +613,41 @@ export async function completeCheckout(page, cfg, label) {
     ".sc-place-order-btn",
   ];
 
-  for (const sel of placeOrderSelectors) {
-    try {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 5000 })) {
-        log('🛒 Placing order...', label);
-        await btn.click();
-        await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
-        log('✅ Order placed!', label);
-        await sleep(3000);
-        log(`Final URL: ${page.url()}`, label);
-        await page.screenshot({ path: `order_confirmation_${label}.png` });
-        log(`Screenshot saved: order_confirmation_${label}.png`, label);
-        return true;
+  const ordered = await withRetry(async () => {
+    for (const sel of placeOrderSelectors) {
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 5000 })) {
+          log('🛒 Placing order...', label);
+          await btn.click();
+          await sleep(2000);
+
+          // Check for error popup after clicking Place Order
+          const hadError = await dismissErrorPopups(page, label);
+          if (hadError) return false; // retry
+
+          await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
+          log('✅ Order placed!', label);
+          await sleep(3000);
+          log(`Final URL: ${page.url()}`, label);
+          await page.screenshot({ path: `order_confirmation_${label}.png` });
+          log(`Screenshot saved: order_confirmation_${label}.png`, label);
+          return true;
+        }
+      } catch (e) {
+        log(`Place order selector failed: ${e.message}`, label);
       }
-    } catch (e) {
-      log(`Place order selector failed: ${e.message}`, label);
     }
+    return false;
+  }, { label, taskName: 'Place Order', delayMs: 2000, page });
+
+  if (!ordered) {
+    log('❌ Could not place order.', label);
+    await page.screenshot({ path: `checkout_stuck_${label}.png` });
+    log(`Screenshot saved: checkout_stuck_${label}.png`, label);
   }
 
-  log('❌ Could not find Place Order button.', label);
-  await page.screenshot({ path: `checkout_stuck_${label}.png` });
-  log(`Screenshot saved: checkout_stuck_${label}.png`, label);
-  return false;
+  return ordered;
 }
 
 
