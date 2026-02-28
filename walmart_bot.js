@@ -10,12 +10,10 @@
  *   npx playwright install chromium
  *
  * Usage:
- *   1. Edit config.js with your items, drop time, and Chrome profile path.
- *   2. Run: node walmart_bot.js
+ *   Run via the web UI: node server.js
  */
 
 import { chromium } from 'playwright';
-import { CONFIG } from './config.js';
 import { writeFileSync } from 'fs';
 
 // ── Logging ───────────────────────────────────────────────────────────────────
@@ -289,69 +287,99 @@ export async function addToCart(page, quantity, label) {
 }
 
 
-/**
- * updateCartQuantity
- * ------------------
- * Called while on the walmart.com/cart page.
- * Walmart's cart uses aria-label stepper buttons with labels like:
- *   "Increase quantity <item name>, Current Quantity 1"
- *   "Decrease quantity <item name>, Current Quantity 1"
- * We read the current quantity from the Increase button's aria-label,
- * then click + or − the right number of times to reach the target.
- */
-export async function updateCartQuantity(page, quantity, label) {
-  log(`Attempting to set cart quantity to ${quantity}...`, label);
-
+async function readCartQuantity(page, label) {
   try {
-    // Find the Increase button — its aria-label tells us current quantity
-    const increaseBtn = page.locator('button[aria-label*="Increase quantity"]').first();
-    const decreaseBtn = page.locator('button[aria-label*="Decrease quantity"]').first();
+    const result = await page.evaluate(() => {
+      // Primary: Walmart quantity stepper label
+      const qtyLabel = document.querySelector('[data-testid="quantity-label"], [data-automation-id="quantity-label"]');
+      if (qtyLabel) {
+        return { source: 'quantity-label', text: qtyLabel.textContent.trim() };
+      }
 
-    if (!await increaseBtn.isVisible({ timeout: 3000 })) {
-      log('⚠️  Stepper buttons not visible — cannot update quantity.', label);
-      await page.screenshot({ path: `cart_qty_debug_${label}.png` });
-      return;
+      // Fallback: "Subtotal (X items)" text
+      const subtotalEls = Array.from(document.querySelectorAll('*'));
+      for (const el of subtotalEls) {
+        if (el.children.length === 0) {
+          const m = el.textContent.match(/Subtotal\s*\((\d+)\s*items?\)/i);
+          if (m) return { source: 'subtotal', text: m[1] };
+        }
+      }
+
+      return null;
+    });
+
+    if (result) {
+      const match = result.text.match(/\d+/);
+      if (match) {
+        const qty = parseInt(match[0]);
+        if (label) log(`Read cart quantity: ${qty} (source: ${result.source}, raw: "${result.text}")`, label);
+        return qty;
+      }
+      if (label) log(`⚠️  Could not parse number from: "${result.text}" (source: ${result.source})`, label);
+    } else {
+      if (label) log('⚠️  Could not find quantity-label or subtotal element', label);
     }
-
-    // Parse current quantity out of aria-label e.g. "...Current Quantity 1"
-    const ariaLabel = await increaseBtn.getAttribute('aria-label') ?? '';
-    const match = ariaLabel.match(/Current Quantity\s+(\d+)/i);
-    const currentQty = match ? parseInt(match[1], 10) : 1;
-    log(`Cart current quantity: ${currentQty}, target: ${quantity}`, label);
-
-    const diff = quantity - currentQty;
-    if (diff === 0) {
-      log(`Cart quantity already at ${quantity} — no change needed.`, label);
-      return;
-    }
-
-    const btn = diff > 0 ? increaseBtn : decreaseBtn;
-    const clicks = Math.abs(diff);
-    log(`Clicking ${diff > 0 ? 'Increase' : 'Decrease'} button ${clicks} time(s)...`, label);
-
-    for (let i = 0; i < clicks; i++) {
-      await btn.click();
-      await sleep(600); // give Walmart's cart UI time to update between clicks
-    }
-
-    // Verify the update by re-reading the aria-label
-    await sleep(1000);
-    const updatedLabel = await increaseBtn.getAttribute('aria-label') ?? '';
-    const updatedMatch = updatedLabel.match(/Current Quantity\s+(\d+)/i);
-    const updatedQty = updatedMatch ? parseInt(updatedMatch[1], 10) : '?';
-    log(`✅ Cart quantity updated to ${updatedQty}.`, label);
-
   } catch (e) {
-    log(`⚠️  updateCartQuantity error: ${e.message}`, label);
-    await page.screenshot({ path: `cart_qty_debug_${label}.png` });
-    log(`Screenshot saved: cart_qty_debug_${label}.png`, label);
+    if (label) log(`⚠️  readCartQuantity error: ${e.message}`, label);
   }
+  return null;
 }
 
+async function updateCartQuantity(page, targetQty, label) {
+  if (targetQty <= 1) return;
+
+  log(`Adjusting cart quantity to ${targetQty}...`, label);
+
+  let attempts = 0;
+  while (true) {
+    attempts++;
+
+    const currentQty = await readCartQuantity(page, label) ?? 1;
+    log(`Cart quantity: ${currentQty} / target: ${targetQty} (attempt ${attempts})`, label);
+
+    if (currentQty === targetQty) {
+      log(`✅ Cart quantity confirmed at ${targetQty}.`, label);
+      return;
+    }
+
+    const diff = targetQty - currentQty;
+    const incBtn = page.locator('[data-testid="quantity-stepper-inc-icon"], [data-automation-id="increment-qty"]').locator('..').first();
+    const decBtn = page.locator('[data-testid="quantity-stepper-dec-icon"], [data-automation-id="decrement-qty"]').locator('..').first();
+    const btn = diff > 0 ? incBtn : decBtn;
+    const clicks = Math.abs(diff);
+
+    log(`Clicking ${diff > 0 ? '+' : '-'} button ${clicks} time(s)...`, label);
+    for (let i = 0; i < clicks; i++) {
+      try {
+        await btn.waitFor({ state: 'visible', timeout: 3000 });
+        await btn.click();
+        await sleep(1000);
+        await dismissPopups(page);
+
+        const afterClick = await readCartQuantity(page, null) ?? 1;
+        log(`After click ${i + 1}/${clicks}: quantity is now ${afterClick}`, label);
+      } catch (e) {
+        log(`⚠️  Button click ${i + 1}/${clicks} failed: ${e.message}`, label);
+      }
+    }
+
+    await sleep(1000);
+    const verifiedQty = await readCartQuantity(page, label) ?? 1;
+    if (verifiedQty === targetQty) {
+      log(`✅ Cart quantity confirmed at ${targetQty}.`, label);
+      return;
+    }
+
+    log(`⚠️  Quantity is ${verifiedQty}, expected ${targetQty} — retrying...`, label);
+    await sleep(1000);
+  }
+}
 
 export async function goToCheckout(page, label, quantity = 1) {
   log('Navigating to cart...', label);
 
+  // Navigate to cart — with retry
+  let navigated = false;
   const cartSelectors = [
     "a[href*='/cart']",
     "button:has-text('View cart')",
@@ -359,7 +387,6 @@ export async function goToCheckout(page, label, quantity = 1) {
     "[data-automation-id='cart-icon-btn']",
   ];
 
-  let navigated = false;
   for (const sel of cartSelectors) {
     try {
       const el = page.locator(sel).first();
@@ -382,13 +409,15 @@ export async function goToCheckout(page, label, quantity = 1) {
 
   await dismissPopups(page);
   log('Waiting for cart to fully load...', label);
-  await sleep(3000);
+  try {
+    await page.waitForLoadState('networkidle', { timeout: 8_000 });
+  } catch { /* non-fatal */ }
+  await sleep(1000);
 
-  // ── Update quantity on cart page before proceeding to checkout ────────────
+  // Update quantity in cart if needed
   if (quantity > 1) {
     await updateCartQuantity(page, quantity, label);
-  } else {
-    log('Quantity is 1 — skipping cart quantity update.', label);
+    await sleep(1000);
   }
 
   const checkoutSelectors = [
@@ -483,9 +512,12 @@ export async function completeCheckout(page, cfg, label) {
   }
 
   const placeOrderSelectors = [
+    "button[data-automation-id='place-order-button']",
+    "button[data-testid='place-order-button']",
     "button[data-automation-id='place-order-btn']",
     "button:has-text('Place order')",
     "button:has-text('Place your order')",
+    "button[aria-label*='Place order']",
     "button[data-tl-id='CheckoutPlaceOrder']",
   ];
 
@@ -521,7 +553,7 @@ export async function runBot(cfg) {
   let items = cfg.items ?? [];
 
   if (!items.length) {
-    log('❌ No items configured. Add at least one item to config.js.');
+    log('❌ No items configured.');
     return;
   }
   if (items.length > 5) {
@@ -569,7 +601,7 @@ export async function runBot(cfg) {
         const added = await addToCart(page, item.quantity, label);
         if (!added) { log('❌ Failed to add to cart.', label); return; }
 
-        const checkedOut = await goToCheckout(page, label, item.quantity);
+        const checkedOut = await goToCheckout(page, label);
         if (!checkedOut) { log('❌ Failed to reach checkout.', label); return; }
 
         await completeCheckout(page, cfg, label);
@@ -598,12 +630,3 @@ export async function runBot(cfg) {
 }
 
 
-// ── Entry point ───────────────────────────────────────────────────────────────
-
-// Only run directly if this is the main module
-if (process.argv[1] && process.argv[1].endsWith('walmart_bot.js')) {
-  runBot(CONFIG).catch(err => {
-    console.error('Fatal error:', err);
-    process.exit(1);
-  });
-}

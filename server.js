@@ -1,7 +1,7 @@
 /**
- * Walmart Drop Bot — Web UI Server
- * =================================
- * Run this instead of walmart_bot.js to use the browser UI.
+ * Drop Bot — Web UI Server
+ * ========================
+ * Supports both Walmart and Sam's Club bots.
  *
  *   node server.js
  *
@@ -9,12 +9,11 @@
  */
 
 import express from 'express';
-import { readFileSync } from 'fs';
 import { createServer } from 'http';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { chromium } from 'playwright';
-import { CONFIG } from './config.js';
+
 import {
   navigateToProduct as walmartNavigateToProduct,
   waitUntilDropTime as walmartWaitUntilDropTime,
@@ -22,17 +21,16 @@ import {
   addToCart as walmartAddToCart,
   goToCheckout as walmartGoToCheckout,
   completeCheckout as walmartCompleteCheckout,
-  dismissPopups as walmartDismissPopups,
   logger as walmartLogger,
 } from './walmart_bot.js';
 
 import {
   navigateToProduct as samsNavigateToProduct,
   waitUntilDropTime as samsWaitUntilDropTime,
+  waitForAddToCart,
   addToCart as samsAddToCart,
   goToCheckout as samsGoToCheckout,
   completeCheckout as samsCompleteCheckout,
-  dismissPopups as samsDismissPopups,
   logger as samsLogger,
 } from './samsclub_bot.js';
 
@@ -46,7 +44,7 @@ app.use(express.json());
 // ── State ─────────────────────────────────────────────────────────────────────
 
 let botRunning = false;
-let sseClients = [];   // active SSE connections
+let sseClients = [];
 
 // ── Logging (broadcasts to all SSE clients) ───────────────────────────────────
 
@@ -82,25 +80,30 @@ app.post('/start', async (req, res) => {
     return res.json({ status: 'error', message: 'Bot is already running.' });
   }
 
-  let { items, drop_time, dry_run, keep_open, bot } = req.body;
+  let { items, drop_time, dry_run, keep_open, bot, chrome_profile, chrome_executable, headless } = req.body;
 
   if (!items || !items.length) {
     return res.json({ status: 'error', message: 'No items provided.' });
   }
   if (items.length > 5) items = items.slice(0, 5);
 
-  // Merge UI values over the file config
   const cfg = {
-    ...CONFIG,
     items,
-    dropTimeIso: drop_time ?? CONFIG.dropTimeIso,
-    dryRun: dry_run ?? CONFIG.dryRun,
-    keepBrowserOpen: keep_open ?? CONFIG.keepBrowserOpen,
     bot: bot ?? 'walmart',
+    dropTimeIso: drop_time ?? '',
+    dryRun: dry_run ?? false,
+    keepBrowserOpen: keep_open ?? true,
+    chromeProfilePath: chrome_profile ?? '',
+    chromeExecutable: chrome_executable ?? '',
+    headless: headless ?? false,
+    queueLeadSeconds: req.body.queue_lead_seconds ?? 5,
+    queueMaxAttempts: req.body.queue_max_attempts ?? 120,
+    queuePollIntervalMs: req.body.queue_poll_interval_ms ?? 1000,
+    queueMaxWaitMinutes: req.body.queue_max_wait_minutes ?? 30,
   };
 
   botRunning = true;
-  uiLog(`Bot started from UI. [${(cfg.bot).toUpperCase()}]`, 'SERVER');
+  uiLog(`Bot started from UI. [${cfg.bot.toUpperCase()}]`, 'SERVER');
 
   // Run bot in background (don't await)
   runBotWithConfig(cfg).finally(() => {
@@ -133,7 +136,6 @@ app.get('/logs', (req, res) => {
 
   sseClients.push(res);
 
-  // Keepalive ping every 25 seconds
   const keepalive = setInterval(() => {
     try { res.write('data: \n\n'); } catch { /* ignore */ }
   }, 25_000);
@@ -145,7 +147,7 @@ app.get('/logs', (req, res) => {
 });
 
 
-// ── Bot runner (used by the web server) ───────────────────────────────────────
+// ── Bot runner ────────────────────────────────────────────────────────────────
 
 async function runBotWithConfig(cfg) {
   const items = cfg.items ?? [];
@@ -154,9 +156,9 @@ async function runBotWithConfig(cfg) {
   const botLabel = isSams ? "Sam's Club Drop Bot" : "Walmart Drop Bot";
   const navigateToProduct = isSams ? samsNavigateToProduct : walmartNavigateToProduct;
   const waitUntilDropTime = isSams ? samsWaitUntilDropTime : walmartWaitUntilDropTime;
-  const addToCart = isSams ? samsAddToCart : walmartAddToCart;
-  const goToCheckout = isSams ? samsGoToCheckout : walmartGoToCheckout;
-  const completeCheckout = isSams ? samsCompleteCheckout : walmartCompleteCheckout;
+  const addToCart         = isSams ? samsAddToCart         : walmartAddToCart;
+  const goToCheckout      = isSams ? samsGoToCheckout      : walmartGoToCheckout;
+  const completeCheckout  = isSams ? samsCompleteCheckout  : walmartCompleteCheckout;
 
   uiLog('='.repeat(50));
   uiLog(`  ${botLabel}`);
@@ -191,16 +193,27 @@ async function runBotWithConfig(cfg) {
     async function runItem(page, item, index) {
       const label = item.name ?? `Item${index + 1}`;
       try {
-        if (!isSams) {
+        if (isSams) {
+          // Sam's Club: poll for ATC button, then add to cart and checkout
+          const ready = await waitForAddToCart(page, cfg, label);
+          if (!ready) { uiLog('❌ Failed to reach Add to Cart.', label); return; }
+
+          const added = await addToCart(page, item.quantity, label);
+          if (!added) { uiLog('❌ Failed to add to cart.', label); return; }
+
+          const checkedOut = await goToCheckout(page, label, item.quantity);
+          if (!checkedOut) { uiLog('❌ Failed to reach checkout.', label); return; }
+        } else {
+          // Walmart: join queue, then add to cart and checkout
           const inQueue = await joinQueue(page, cfg, item, label);
           if (!inQueue) { uiLog('❌ Failed to reach Add to Cart.', label); return; }
+
+          const added = await addToCart(page, item.quantity, label);
+          if (!added) { uiLog('❌ Failed to add to cart.', label); return; }
+
+          const checkedOut = await goToCheckout(page, label, item.quantity);
+          if (!checkedOut) { uiLog('❌ Failed to reach checkout.', label); return; }
         }
-
-        const added = await addToCart(page, item.quantity, label);
-        if (!added) { uiLog('❌ Failed to add to cart.', label); return; }
-
-        const checkedOut = await goToCheckout(page, label, item.quantity);
-        if (!checkedOut) { uiLog('❌ Failed to reach checkout.', label); return; }
 
         await completeCheckout(page, cfg, label);
       } catch (e) {

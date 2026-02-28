@@ -6,17 +6,10 @@
  * directly and the bot monitors for Add to Cart availability.
  * Supports up to 5 items running concurrently in separate tabs.
  *
- * Requirements:
- *   npm install
- *   npx playwright install chromium
- *
- * Usage:
- *   1. Edit config.js with your items, drop time, and Chrome profile path.
- *   2. Run: node samsclub_bot.js
+ * Run via the web UI: node server.js
  */
 
 import { chromium } from 'playwright';
-import { CONFIG } from './config.js';
 
 // ── Logging ───────────────────────────────────────────────────────────────────
 
@@ -81,11 +74,9 @@ export async function dismissPopups(page) {
 }
 
 // Dismisses error/alert dialogs that Sam's Club shows during drops
-// (e.g. "Something went wrong", "Item unavailable", "Please try again")
 // Returns true if an error popup was found and dismissed.
 async function dismissErrorPopups(page, label) {
   const errorSelectors = [
-    // Generic error modals
     "button:has-text('Try again')",
     "button:has-text('OK')",
     "button:has-text('Ok')",
@@ -94,12 +85,10 @@ async function dismissErrorPopups(page, label) {
     "button:has-text('Close')",
     "button[aria-label='Close']",
     "button[aria-label='close']",
-    // Sam's Club specific error dialogs
     "[data-automation-id='error-modal-close']",
     "[data-automation-id='alert-close']",
     "[data-testid='modal-close']",
     "[data-testid='error-close']",
-    // Toast/snackbar dismiss
     "[data-testid='toast-close']",
     "button[class*='modal-close']",
     "button[class*='dialog-close']",
@@ -124,7 +113,8 @@ async function dismissErrorPopups(page, label) {
   return dismissed;
 }
 
-// Retries an async action indefinitely until it succeeds, dismissing error popups between each attempt.
+// Retries an async action indefinitely until it succeeds,
+// dismissing error popups between each attempt.
 async function withRetry(action, { label, taskName, delayMs = 1500, page }) {
   let attempt = 0;
   while (true) {
@@ -132,13 +122,11 @@ async function withRetry(action, { label, taskName, delayMs = 1500, page }) {
     try {
       const result = await action();
       if (result !== false) return result;
-      // action returned false — treat as soft failure, retry
       log(`⚠️  ${taskName} attempt ${attempt} failed — retrying...`, label);
     } catch (e) {
       log(`⚠️  ${taskName} attempt ${attempt} error: ${e.message} — retrying...`, label);
     }
 
-    // Dismiss any error popups before retrying
     const hadPopup = await dismissErrorPopups(page, label);
     if (!hadPopup) await dismissPopups(page);
     log(`🔄 Retrying ${taskName} (attempt ${attempt + 1})...`, label);
@@ -316,12 +304,41 @@ export async function addToCart(page, quantity, label) {
 }
 
 
-async function readCartQuantity(page) {
+async function readCartQuantity(page, label) {
   try {
-    const qtyText = await page.locator('[data-testid="quantity-stepper-count"]').first().innerText({ timeout: 3000 });
-    const parsed = parseInt(qtyText.trim());
-    if (!isNaN(parsed)) return parsed;
-  } catch { /* ignore */ }
+    const result = await page.evaluate(() => {
+      // Primary: data-testid="quantity-label" — the span between the +/- buttons
+      const label = document.querySelector('[data-testid="quantity-label"]');
+      if (label) {
+        return { source: 'quantity-label', text: label.textContent.trim() };
+      }
+
+      // Fallback: "Subtotal(X items)" text
+      const subtotalEls = Array.from(document.querySelectorAll('*'));
+      for (const el of subtotalEls) {
+        if (el.children.length === 0) {
+          const m = el.textContent.match(/Subtotal\s*\((\d+)\s*items?\)/i);
+          if (m) return { source: 'subtotal', text: m[1] };
+        }
+      }
+
+      return null;
+    });
+
+    if (result) {
+      const match = result.text.match(/\d+/);
+      if (match) {
+        const qty = parseInt(match[0]);
+        if (label) log(`Read cart quantity: ${qty} (source: ${result.source}, raw: "${result.text}")`, label);
+        return qty;
+      }
+      if (label) log(`⚠️  Could not parse number from: "${result.text}" (source: ${result.source})`, label);
+    } else {
+      if (label) log('⚠️  Could not find quantity-label or subtotal element', label);
+    }
+  } catch (e) {
+    if (label) log(`⚠️  readCartQuantity error: ${e.message}`, label);
+  }
   return null;
 }
 
@@ -330,13 +347,12 @@ export async function updateCartQuantity(page, targetQty, label) {
 
   log(`Adjusting cart quantity to ${targetQty}...`, label);
 
-  // Keep looping until the cart quantity matches the target
   let attempts = 0;
   while (true) {
     attempts++;
 
-    // Read current quantity
-    const currentQty = await readCartQuantity(page) ?? 1;
+    // Read current quantity with full diagnostics
+    const currentQty = await readCartQuantity(page, label) ?? 1;
     log(`Cart quantity: ${currentQty} / target: ${targetQty} (attempt ${attempts})`, label);
 
     if (currentQty === targetQty) {
@@ -345,9 +361,9 @@ export async function updateCartQuantity(page, targetQty, label) {
     }
 
     const diff = targetQty - currentQty;
-    const btn = diff > 0
-      ? page.locator('[data-testid="quantity-stepper-inc-icon"]').locator('..').first()
-      : page.locator('[data-testid="quantity-stepper-dec-icon"]').locator('..').first();
+    const incBtn = page.locator('[data-testid="quantity-stepper-inc-icon"]').locator('..').first();
+    const decBtn = page.locator('[data-testid="quantity-stepper-dec-icon"]').locator('..').first();
+    const btn = diff > 0 ? incBtn : decBtn;
     const clicks = Math.abs(diff);
 
     log(`Clicking ${diff > 0 ? '+' : '-'} button ${clicks} time(s)...`, label);
@@ -355,16 +371,21 @@ export async function updateCartQuantity(page, targetQty, label) {
       try {
         await btn.waitFor({ state: 'visible', timeout: 3000 });
         await btn.click();
-        await sleep(600);
+        // Wait for the DOM to reflect the new quantity before reading again
+        await sleep(1000);
         await dismissErrorPopups(page, label);
+
+        // Verify each individual click updated the count
+        const afterClick = await readCartQuantity(page, null) ?? 1;
+        log(`After click ${i + 1}/${clicks}: quantity is now ${afterClick}`, label);
       } catch (e) {
         log(`⚠️  Button click ${i + 1}/${clicks} failed: ${e.message}`, label);
       }
     }
 
-    // Wait for UI to settle then verify
-    await sleep(800);
-    const verifiedQty = await readCartQuantity(page) ?? 1;
+    // Final settle and verify
+    await sleep(1000);
+    const verifiedQty = await readCartQuantity(page, label) ?? 1;
     if (verifiedQty === targetQty) {
       log(`✅ Cart quantity confirmed at ${targetQty}.`, label);
       return;
@@ -405,13 +426,11 @@ export async function goToCheckout(page, label, quantity = 1) {
       }
     }
 
-    // Fall back to direct navigation
     log('Cart button not found — navigating directly to /cart', label);
     await page.goto('https://www.samsclub.com/cart', { waitUntil: 'domcontentloaded' });
 
-    // Check for error after navigation
     const hadError = await dismissErrorPopups(page, label);
-    if (hadError) return false; // retry
+    if (hadError) return false;
 
     return true;
   }, { label, taskName: 'Navigate to cart', delayMs: 2000, page });
@@ -429,7 +448,7 @@ export async function goToCheckout(page, label, quantity = 1) {
   } catch { /* non-fatal */ }
   await sleep(1000);
 
-  // Update quantity in cart if needed — already has internal retry
+  // Update quantity in cart if needed
   if (quantity > 1) {
     await updateCartQuantity(page, quantity, label);
     await sleep(1000);
@@ -437,7 +456,6 @@ export async function goToCheckout(page, label, quantity = 1) {
 
   // Click checkout button — with retry
   const checkedOut = await withRetry(async () => {
-    // Explicitly wait for the checkout button to appear
     try {
       await page.waitForSelector('[data-automation-id="checkout"]', { state: 'visible', timeout: 3_000 });
     } catch { /* proceed anyway */ }
@@ -468,9 +486,8 @@ export async function goToCheckout(page, label, quantity = 1) {
           await btn.click();
           await sleep(1500);
 
-          // Check for error popup after clicking checkout
           const hadError = await dismissErrorPopups(page, label);
-          if (hadError) return false; // retry
+          if (hadError) return false;
 
           await page.waitForLoadState('domcontentloaded');
           log('✅ Proceeded to checkout.', label);
@@ -507,7 +524,6 @@ export async function goToCheckout(page, label, quantity = 1) {
   }, { label, taskName: 'Click checkout button', delayMs: 2000, page });
 
   if (!checkedOut) {
-    // Diagnostic dump
     log('⚠️  Checkout button not found — dumping visible buttons for diagnosis...', label);
     try {
       const allBtns = await page.locator('button, a[href*="checkout"]').all();
@@ -538,9 +554,7 @@ export async function completeCheckout(page, cfg, label) {
 
   try {
     await page.waitForLoadState('networkidle', { timeout: 10_000 });
-  } catch {
-    // non-fatal
-  }
+  } catch { /* non-fatal */ }
 
   const continueSelectors = [
     "button:has-text('Continue')",
@@ -606,6 +620,9 @@ export async function completeCheckout(page, cfg, label) {
 
   // Place Order — with retry
   const placeOrderSelectors = [
+    "button[data-automation-id='place-order-button']",
+    "button[data-testid='place-order-button']",
+    "button[aria-label*='Place order']",
     "button:has-text('Place order')",
     "button:has-text('Place your order')",
     "button:has-text('Submit order')",
@@ -622,9 +639,8 @@ export async function completeCheckout(page, cfg, label) {
           await btn.click();
           await sleep(2000);
 
-          // Check for error popup after clicking Place Order
           const hadError = await dismissErrorPopups(page, label);
-          if (hadError) return false; // retry
+          if (hadError) return false;
 
           await page.waitForLoadState('domcontentloaded', { timeout: 15_000 });
           log('✅ Order placed!', label);
@@ -657,7 +673,7 @@ export async function runBot(cfg) {
   let items = cfg.items ?? [];
 
   if (!items.length) {
-    log("❌ No items configured. Add at least one item to config.js.");
+    log("❌ No items configured.");
     return;
   }
   if (items.length > 5) {
@@ -729,14 +745,4 @@ export async function runBot(cfg) {
       await new Promise(resolve => context.on('close', resolve));
     }
   }
-}
-
-
-// ── Entry point ───────────────────────────────────────────────────────────────
-
-if (process.argv[1] && process.argv[1].endsWith('samsclub_bot.js')) {
-  runBot(CONFIG).catch(err => {
-    console.error('Fatal error:', err);
-    process.exit(1);
-  });
 }

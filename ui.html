@@ -387,6 +387,22 @@
   }
   .btn-stop:hover { background: var(--red-dim); }
   .btn-stop.visible { display: block; }
+  .btn-save {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 12px 20px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-muted);
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .btn-save:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-save.saved { border-color: var(--accent); color: var(--accent); }
 
   /* ── Log panel ── */
   .log-header {
@@ -507,6 +523,36 @@
 
     <br>
 
+    <div class="section-label" style="margin-top: 28px;">Browser</div>
+    <div class="drop-time-block" style="margin-bottom: 16px;">
+      <label>Chrome Profile Path</label>
+      <input type="text" id="chromeProfile" placeholder="C:/Users/You/AppData/Local/Google/Chrome/DropBot" style="
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 10px 14px;
+        outline: none;
+        transition: border-color 0.2s;
+      " onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+    </div>
+    <div class="drop-time-block" style="margin-bottom: 24px;">
+      <label>Chrome Executable Path</label>
+      <input type="text" id="chromeExecutable" placeholder="C:/Program Files/Google/Chrome/Application/chrome.exe" style="
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        color: var(--text);
+        font-family: var(--mono);
+        font-size: 12px;
+        padding: 10px 14px;
+        outline: none;
+        transition: border-color 0.2s;
+      " onfocus="this.style.borderColor='var(--accent)'" onblur="this.style.borderColor='var(--border)'">
+    </div>
+
     <div class="options-row">
       <label class="toggle-label">
         <input type="checkbox" id="dryRunToggle" checked>
@@ -518,11 +564,17 @@
         <div class="toggle"></div>
         Keep Browser Open
       </label>
+      <label class="toggle-label">
+        <input type="checkbox" id="headlessToggle">
+        <div class="toggle"></div>
+        Headless
+      </label>
     </div>
 
     <div class="action-row">
       <button class="btn-start" id="startBtn" onclick="startBot()">▶ LAUNCH BOT</button>
       <button class="btn-stop" id="stopBtn" onclick="stopBot()">■ STOP</button>
+      <button class="btn-save" id="saveBtn" onclick="manualSave()">💾 SAVE</button>
     </div>
 
   </div>
@@ -546,6 +598,53 @@
   let isRunning = false;
   let eventSource = null;
 
+  // ── Persistence (localStorage) ──────────────────────────────────────────
+  const PERSIST_KEYS = [
+    'chromeProfile',
+    'chromeExecutable',
+    'botSelect',
+    'dryRunToggle',
+    'keepOpenToggle',
+    'headlessToggle',
+  ];
+
+  function manualSave() {
+    saveSettings();
+    const btn = document.getElementById('saveBtn');
+    btn.textContent = '✓ SAVED';
+    btn.classList.add('saved');
+    setTimeout(() => {
+      btn.textContent = '💾 SAVE';
+      btn.classList.remove('saved');
+    }, 2000);
+  }
+
+  function saveSettings() {
+    PERSIST_KEYS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const val = el.type === 'checkbox' ? el.checked : el.value;
+      localStorage.setItem(`dropbot_${id}`, JSON.stringify(val));
+    });
+  }
+
+  function loadSettings() {
+    PERSIST_KEYS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      const stored = localStorage.getItem(`dropbot_${id}`);
+      if (stored === null) return;
+      const val = JSON.parse(stored);
+      if (el.type === 'checkbox') {
+        el.checked = val;
+      } else {
+        el.value = val;
+      }
+    });
+    // Sync logo text after bot selection is restored
+    onBotChange();
+  }
+
   // ── Init ─────────────────────────────────────────────────────────────────
   document.addEventListener('DOMContentLoaded', () => {
     addItem(); // start with one item row
@@ -553,6 +652,17 @@
     const soon = new Date(Date.now() + 3600_000);
     soon.setSeconds(0, 0);
     document.getElementById('dropTime').value = soon.toISOString().slice(0, 19);
+
+    // Restore saved settings
+    loadSettings();
+
+    // Save settings on any change
+    PERSIST_KEYS.forEach(id => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.addEventListener('change', saveSettings);
+      el.addEventListener('input', saveSettings);
+    });
   });
 
   // ── Item rows ────────────────────────────────────────────────────────────
@@ -640,6 +750,14 @@
     const dropTime = document.getElementById('dropTime').value || '';
     const dryRun = document.getElementById('dryRunToggle').checked;
     const keepOpen = document.getElementById('keepOpenToggle').checked;
+    const headless = document.getElementById('headlessToggle').checked;
+    const chromeProfile = document.getElementById('chromeProfile').value.trim();
+    const chromeExecutable = document.getElementById('chromeExecutable').value.trim();
+
+    if (!chromeProfile) {
+      appendLog('❌ Please enter your Chrome Profile Path.', 'error');
+      return;
+    }
 
     setRunning(true);
     clearLogs();
@@ -647,7 +765,16 @@
     const res = await fetch('/start', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items, drop_time: dropTime, dry_run: dryRun, keep_open: keepOpen, bot: document.getElementById('botSelect').value })
+      body: JSON.stringify({
+        items,
+        drop_time: dropTime,
+        dry_run: dryRun,
+        keep_open: keepOpen,
+        headless,
+        chrome_profile: chromeProfile,
+        chrome_executable: chromeExecutable,
+        bot: document.getElementById('botSelect').value
+      })
     });
     const data = await res.json();
 
